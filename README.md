@@ -31,6 +31,7 @@ keys edit Safari                              # Edit a shortcut interactively
 keys delete Finder                            # Delete a shortcut
 keys export ~/Desktop/backup.plist            # Backup all shortcuts
 keys import ~/Desktop/backup.plist            # Restore from backup
+keys update                                   # Update to latest version
 keys nuke                                     # Remove ALL custom shortcuts
 
 # Snippets — paste text with a shortcut
@@ -82,6 +83,7 @@ When you add a shortcut, `keys` also:
 | `snippet add <name> <key> <text>` | Paste text when shortcut is pressed |
 | `snippet list` | List all snippets |
 | `snippet delete <name>` | Delete a snippet |
+| `update` | Update keys to the latest version from GitHub |
 | `nuke` | Remove all custom shortcuts (requires confirmation) |
 
 ## Snippets

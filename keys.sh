@@ -786,13 +786,17 @@ cmd_snippet_add() {
 
     # ── Create Automator Quick Action via Python
     python3 -c "
-import plistlib, os, json, base64
+import plistlib, os, json, base64, re
 from uuid import uuid4
 
 name = '''$name'''
 text = '''$text'''
 shortcut_plist = '''$plist_key'''
 service_name = '''$service_name'''
+
+# Bundle ID from name (alphanumeric + dots only)
+safe_name = re.sub(r'[^a-zA-Z0-9]', '-', name)
+bundle_id = f'com.keys-cli.snippet.{safe_name}'
 
 # Encode text as base64 to avoid shell quoting issues
 encoded = base64.b64encode(text.encode()).decode()
@@ -806,12 +810,19 @@ services_dir = os.path.expanduser('~/Library/Services')
 workflow_dir = os.path.join(services_dir, f'{service_name}.workflow', 'Contents')
 os.makedirs(workflow_dir, exist_ok=True)
 
-# Info.plist
+# Info.plist — must match real Automator workflow bundles
 info = {
+    'CFBundleDevelopmentRegion': 'en',
+    'CFBundleIdentifier': bundle_id,
+    'CFBundleName': service_name,
+    'CFBundleShortVersionString': '1.0',
+    'CFBundleVersion': '1',
+    'CFBundleInfoDictionaryVersion': '6.0',
+    'CFBundlePackageType': 'BNDL',
     'NSServices': [{
         'NSMenuItem': {'default': service_name},
         'NSMessage': 'runWorkflowAsService',
-        'NSRequiredContext': {},
+        'NSSendTypes': ['public.utf8-plain-text'],
     }]
 }
 
@@ -903,6 +914,11 @@ print('OK')
         echo -e "  ${RED}${FAIL} Failed to create snippet.${RST}\n"
         return 1
     fi
+
+    local workflow_path="${SERVICES_DIR}/${service_name}.workflow"
+
+    # Register the workflow bundle with Launch Services so macOS discovers it
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$workflow_path" 2>/dev/null || true
 
     # Try to bind the shortcut via pbs (services shortcut store)
     local pbs_path="$HOME/Library/Preferences/pbs.plist"
@@ -1036,6 +1052,7 @@ cmd_interactive() {
         echo -e "   e${MAG}x${RST}port    Export all shortcuts (backup)"
         echo -e "   ${MAG}i${RST}mport    Import shortcuts from backup"
         echo -e "   ${MAG}s${RST}nippet   Paste text with a shortcut (e.g. Zoom link)"
+        echo -e "   ${BLU}u${RST}pdate    Update keys to latest version"
         echo -e "   ${RED}n${RST}uke      Remove all custom shortcuts"
         echo -e "   ${GRY}q${RST}uit"
         echo ""
@@ -1050,6 +1067,7 @@ cmd_interactive() {
             x|export)   cmd_export ;;
             i|import)   cmd_import ;;
             s|snippet)  cmd_snippet_help; read -rp "  ${DOT} snippet " sub; cmd_snippet "$sub" ;;
+            u|update)   cmd_update ;;
             n|nuke)     cmd_nuke ;;
             q|quit|exit) echo -e "  ${DIM}Bye.${RST}"; exit 0 ;;
             *)          echo -e "  ${RED}?${RST} Unknown: ${choice}" ;;
@@ -1077,6 +1095,7 @@ ${BLU}${BLD}  ⌨  keys${RST} ${GRY}v${VERSION}${RST} — Native macOS Keyboard 
     ${MAG}snippet${RST} add <name> <key> <text>  Paste text with a shortcut
     ${MAG}snippet${RST} list                    List all snippets
     ${MAG}snippet${RST} delete <name>            Delete a snippet
+    ${BLU}update${RST}                         Update keys to the latest version
     ${RED}nuke${RST}                           Remove ALL custom shortcuts
 
   ${BLD}SHORTCUT FORMAT${RST}
@@ -1109,6 +1128,52 @@ ${BLU}${BLD}  ⌨  keys${RST} ${GRY}v${VERSION}${RST} — Native macOS Keyboard 
 "
 }
 
+# ── Update ─────────────────────────────────────────────────────────────
+
+REPO_URL="https://raw.githubusercontent.com/alexisprovost/keys-cli/main/keys.sh"
+
+cmd_update() {
+    echo -e "\n  ${BLU}${BLD}${KEY} Update${RST}\n"
+    echo -e "  ${DIM}Checking for updates...${RST}"
+
+    local tmp="/tmp/keys-update-$$"
+    if ! curl -fsSL "$REPO_URL" -o "$tmp" 2>/dev/null; then
+        echo -e "  ${RED}${FAIL} Failed to fetch latest version.${RST}\n"
+        rm -f "$tmp"
+        return 1
+    fi
+
+    local remote_version
+    remote_version=$(grep '^VERSION=' "$tmp" | head -1 | sed 's/VERSION="//;s/"//')
+
+    if [[ "$remote_version" == "$VERSION" ]]; then
+        # Check if file contents differ even with same version
+        local self
+        self=$(which keys 2>/dev/null || echo "$0")
+        if diff -q "$self" "$tmp" >/dev/null 2>&1; then
+            echo -e "  ${GRN}${OK} Already up to date (v${VERSION}).${RST}\n"
+            rm -f "$tmp"
+            return 0
+        fi
+        echo -e "  ${YEL}${WARN} Same version (v${VERSION}) but files differ. Updating...${RST}"
+    else
+        echo -e "  ${GRN}${OK} New version available: v${VERSION} → v${remote_version}${RST}"
+    fi
+
+    local install_path
+    install_path=$(which keys 2>/dev/null || echo "/usr/local/bin/keys")
+
+    if [[ -w "$install_path" ]]; then
+        mv "$tmp" "$install_path"
+        chmod +x "$install_path"
+    else
+        sudo mv "$tmp" "$install_path"
+        sudo chmod +x "$install_path"
+    fi
+
+    echo -e "  ${GRN}${BLD}${OK} Updated to v${remote_version}.${RST}\n"
+}
+
 # ════════════════════════════════════════════════════════════════════════
 #  MAIN
 # ════════════════════════════════════════════════════════════════════════
@@ -1122,6 +1187,7 @@ case "${1:-}" in
     export|backup)  shift; cmd_export "${1:-}" ;;
     import|restore) shift; cmd_import "${1:-}" ;;
     snippet)        shift; cmd_snippet "$@" ;;
+    update|upgrade) cmd_update ;;
     nuke|reset)     cmd_nuke ;;
     help|-h|--help) usage ;;
     version|-v|--version) echo "keys v${VERSION}" ;;
