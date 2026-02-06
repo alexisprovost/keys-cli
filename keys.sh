@@ -24,6 +24,12 @@ SERVICES_DIR="$HOME/Library/Services"
 SNIPPET_CONFIG_DIR="$HOME/.config/keys"
 SNIPPET_CONFIG="$SNIPPET_CONFIG_DIR/snippets.json"
 SNIPPET_PREFIX="Keys"
+DAEMON_SRC_URL="https://raw.githubusercontent.com/alexisprovost/keys-cli/main/keys-daemon.swift"
+DAEMON_APP="$SNIPPET_CONFIG_DIR/KeysDaemon.app"
+DAEMON_BIN="$DAEMON_APP/Contents/MacOS/keys-daemon"
+DAEMON_LABEL="com.keys-cli.daemon"
+DAEMON_PLIST="$HOME/Library/LaunchAgents/${DAEMON_LABEL}.plist"
+DAEMON_LOG="$SNIPPET_CONFIG_DIR/daemon.log"
 
 # ── TUI Colors & Glyphs ────────────────────────────────────────────────
 if [[ -t 1 ]]; then
@@ -702,28 +708,154 @@ print(f'Removed shortcuts from {len(domains)} domains')
     echo -e "  ${GRN}${OK} All custom shortcuts removed.${RST}\n"
 }
 
+# ── Daemon Helpers ────────────────────────────────────────────────────
+# The snippet daemon is a compiled Swift binary that registers global
+# hotkeys via Carbon RegisterEventHotKey and pastes text via CGEvent.
+# It runs as a launchd agent so it starts automatically on login.
+
+ensure_daemon() {
+    if [[ -f "$DAEMON_BIN" ]]; then
+        return 0
+    fi
+
+    echo -e "  ${DIM}Compiling snippet daemon (first time only)...${RST}"
+    mkdir -p "$SNIPPET_CONFIG_DIR"
+
+    local src=""
+    # Check for source next to this script
+    local script_dir
+    script_dir="$(cd "$(dirname "$0")" && pwd)"
+    if [[ -f "$script_dir/keys-daemon.swift" ]]; then
+        src="$script_dir/keys-daemon.swift"
+    else
+        # Download from GitHub
+        src="/tmp/keys-daemon-$$.swift"
+        if ! curl -fsSL "$DAEMON_SRC_URL" -o "$src" 2>/dev/null; then
+            echo -e "  ${RED}${FAIL} Failed to download daemon source.${RST}"
+            return 1
+        fi
+    fi
+
+    # Create .app bundle structure so macOS grants Accessibility to the app, not Terminal
+    local app_contents="$DAEMON_APP/Contents"
+    local app_macos="$app_contents/MacOS"
+    mkdir -p "$app_macos"
+
+    if ! swiftc -o "$DAEMON_BIN" "$src" -framework AppKit -framework Carbon 2>&1; then
+        echo -e "  ${RED}${FAIL} Failed to compile. Install Xcode Command Line Tools: xcode-select --install${RST}"
+        [[ "$src" == /tmp/* ]] && rm -f "$src"
+        return 1
+    fi
+
+    # Create Info.plist for the .app bundle
+    cat > "$app_contents/Info.plist" << 'APPEOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.keys-cli.daemon</string>
+    <key>CFBundleName</key>
+    <string>Keys Daemon</string>
+    <key>CFBundleExecutable</key>
+    <string>keys-daemon</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>LSBackgroundOnly</key>
+    <true/>
+    <key>LSUIElement</key>
+    <true/>
+</dict>
+</plist>
+APPEOF
+
+    [[ "$src" == /tmp/* ]] && rm -f "$src"
+
+    # Remove old non-bundled binary if it exists
+    [[ -f "$SNIPPET_CONFIG_DIR/keys-daemon" && ! -d "$DAEMON_APP" ]] && rm -f "$SNIPPET_CONFIG_DIR/keys-daemon"
+
+    echo -e "  ${GRN}${OK} Daemon compiled.${RST}"
+}
+
+create_daemon_plist() {
+    mkdir -p "$HOME/Library/LaunchAgents"
+    cat > "$DAEMON_PLIST" << PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${DAEMON_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${DAEMON_BIN}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${DAEMON_LOG}</string>
+    <key>StandardErrorPath</key>
+    <string>${DAEMON_LOG}</string>
+</dict>
+</plist>
+PLISTEOF
+}
+
+restart_daemon() {
+    # Stop if running
+    launchctl unload "$DAEMON_PLIST" 2>/dev/null || true
+    # Create/update plist
+    create_daemon_plist
+    # Start
+    launchctl load "$DAEMON_PLIST"
+}
+
+stop_daemon() {
+    launchctl unload "$DAEMON_PLIST" 2>/dev/null || true
+    rm -f "$DAEMON_PLIST"
+}
+
+daemon_status() {
+    if pgrep -f "keys-daemon" >/dev/null 2>&1; then
+        echo "running"
+    else
+        echo "stopped"
+    fi
+}
+
 # ── Snippet Commands ───────────────────────────────────────────────────
-# Snippets create macOS Quick Actions (Automator workflows) in
-# ~/Library/Services/ that copy text to clipboard and paste it.
-# The shortcut is bound via System Settings > Keyboard > Services.
+# Snippets use a compiled Swift daemon that registers global hotkeys
+# and pastes text via the clipboard + simulated Cmd+V.
+# Requires Accessibility permission (prompted on first run).
 
 cmd_snippet() {
     case "${1:-}" in
         add)    shift; cmd_snippet_add "$@" ;;
         list|ls) cmd_snippet_list ;;
         delete|rm) shift; cmd_snippet_delete "$@" ;;
+        status) cmd_snippet_status ;;
+        restart) restart_daemon; echo -e "  ${GRN}${OK} Daemon restarted.${RST}" ;;
+        stop)   stop_daemon; echo -e "  ${GRN}${OK} Daemon stopped.${RST}" ;;
         *)      cmd_snippet_help ;;
     esac
 }
 
 cmd_snippet_help() {
     echo -e "
-  ${BLU}${BLD}${KEY} Snippet — Paste text with a shortcut${RST}
+  ${BLU}${BLD}${KEY} Snippet — Paste text with a global shortcut${RST}
 
   ${BLD}USAGE${RST}
     keys snippet add <name> <shortcut> <text>
     keys snippet list
     keys snippet delete <name>
+    keys snippet status
+    keys snippet restart
 
   ${BLD}EXAMPLES${RST}
     ${GRY}\$${RST} keys snippet add \"Zoom\" cmd+shift+z \"https://zoom.us/j/123456\"
@@ -732,10 +864,28 @@ cmd_snippet_help() {
     ${GRY}\$${RST} keys snippet delete \"Zoom\"
 
   ${BLD}HOW IT WORKS${RST}
-    Creates a macOS Quick Action (Automator workflow) in ~/Library/Services/
-    that copies your text to the clipboard and pastes it. Assign the shortcut in:
-      ${CYN}System Settings → Keyboard → Keyboard Shortcuts → Services → Text${RST}
+    Runs a lightweight background daemon that listens for global hotkeys
+    and pastes your text via the clipboard. Starts automatically on login.
+    Requires Accessibility permission (you'll be prompted on first use).
 "
+}
+
+cmd_snippet_status() {
+    local status
+    status=$(daemon_status)
+    if [[ "$status" == "running" ]]; then
+        echo -e "  ${GRN}${OK} Snippet daemon is running.${RST}"
+    else
+        echo -e "  ${YEL}${WARN} Snippet daemon is not running.${RST}"
+    fi
+
+    if [[ -f "$SNIPPET_CONFIG" ]]; then
+        local count
+        count=$(python3 -c "import json; print(len(json.load(open('$SNIPPET_CONFIG'))))" 2>/dev/null || echo "0")
+        echo -e "  ${DIM}${count} snippet(s) configured.${RST}"
+    else
+        echo -e "  ${DIM}No snippets configured.${RST}"
+    fi
 }
 
 cmd_snippet_add() {
@@ -750,8 +900,6 @@ cmd_snippet_add() {
         read -rp "  Name: " name
     fi
     [[ -z "$name" ]] && { echo -e "  ${RED}Aborted.${RST}"; return 1; }
-
-    local service_name="${SNIPPET_PREFIX} - ${name}"
 
     # ── Shortcut
     local shortcut_input plist_key
@@ -784,173 +932,56 @@ cmd_snippet_add() {
         echo -e "  ${GRN}${OK} No conflicts for ${WHT}${human_key}${RST}"
     fi
 
-    # ── Create Automator Quick Action via Python
+    # ── Save to snippets.json
+    mkdir -p "$SNIPPET_CONFIG_DIR"
     python3 -c "
-import plistlib, os, json, base64, re
-from uuid import uuid4
+import json, os
 
-name = '''$name'''
-text = '''$text'''
-shortcut_plist = '''$plist_key'''
-service_name = '''$service_name'''
-
-# Bundle ID from name (alphanumeric + dots only)
-safe_name = re.sub(r'[^a-zA-Z0-9]', '-', name)
-bundle_id = f'com.keys-cli.snippet.{safe_name}'
-
-# Encode text as base64 to avoid shell quoting issues
-encoded = base64.b64encode(text.encode()).decode()
-shell_script = f\"\"\"export PATH=/usr/bin:/usr/local/bin:\$PATH
-echo '{encoded}' | base64 -d | pbcopy
-sleep 0.1
-osascript -e 'tell application \"System Events\" to keystroke \"v\" using command down'
-\"\"\"
-
-services_dir = os.path.expanduser('~/Library/Services')
-workflow_dir = os.path.join(services_dir, f'{service_name}.workflow', 'Contents')
-os.makedirs(workflow_dir, exist_ok=True)
-
-# Info.plist — must match real Automator workflow bundles
-info = {
-    'CFBundleDevelopmentRegion': 'en',
-    'CFBundleIdentifier': bundle_id,
-    'CFBundleName': service_name,
-    'CFBundleShortVersionString': '1.0',
-    'CFBundleVersion': '1',
-    'CFBundleInfoDictionaryVersion': '6.0',
-    'CFBundlePackageType': 'BNDL',
-    'NSServices': [{
-        'NSMenuItem': {'default': service_name},
-        'NSMessage': 'runWorkflowAsService',
-        'NSRequiredContext': {},
-    }]
-}
-
-# document.wflow
-uid1 = str(uuid4()).upper()
-uid2 = str(uuid4()).upper()
-uid3 = str(uuid4()).upper()
-wflow = {
-    'AMApplicationBuild': '523',
-    'AMApplicationVersion': '2.10',
-    'AMDocumentVersion': '2',
-    'actions': [{
-        'action': {
-            'AMAccepts': {'Container': 'List', 'Optional': True, 'Types': ['com.apple.cocoa.string']},
-            'AMActionVersion': '2.0.3',
-            'AMApplication': ['Automator'],
-            'AMCategory': 'AMCategoryUtilities',
-            'AMIconName': 'RunShellScript',
-            'AMParameterProperties': {
-                'COMMAND_STRING': {}, 'CheckedForUserDefaultShell': {},
-                'inputMethod': {}, 'shell': {}, 'source': {}
-            },
-            'AMProvides': {'Container': 'List', 'Types': ['com.apple.cocoa.string']},
-            'ActionBundlePath': '/System/Library/Automator/Run Shell Script.action',
-            'ActionName': 'Run Shell Script',
-            'ActionParameters': {
-                'COMMAND_STRING': shell_script,
-                'CheckedForUserDefaultShell': True,
-                'inputMethod': 1,
-                'shell': '/bin/bash',
-                'source': ''
-            },
-            'BundleIdentifier': 'com.apple.RunShellScript',
-            'CFBundleVersion': '2.0.3',
-            'CanShowSelectedItemsWhenRun': False,
-            'CanShowWhenRun': True,
-            'Category': ['AMCategoryUtilities'],
-            'Class Name': 'RunShellScriptAction',
-            'InputUUID': uid1,
-            'Keywords': ['Shell', 'Script', 'Command', 'Run', 'Unix'],
-            'OutputUUID': uid2,
-            'UUID': uid3,
-            'UnlocalizedApplications': ['Automator'],
-            'arguments': {
-                '0': {'default value': 0, 'name': 'inputMethod', 'required': '0', 'type': '0', 'uuid': '0'},
-                '1': {'default value': '', 'name': 'source', 'required': '0', 'type': '0', 'uuid': '1'},
-                '2': {'default value': '/bin/bash', 'name': 'shell', 'required': '0', 'type': '0', 'uuid': '2'},
-                '3': {'default value': '', 'name': 'COMMAND_STRING', 'required': '0', 'type': '0', 'uuid': '3'},
-                '4': {'default value': True, 'name': 'CheckedForUserDefaultShell', 'required': '0', 'type': '0', 'uuid': '4'},
-            },
-            'conversionLabel': 0,
-            'isViewVisible': True,
-        }
-    }],
-    'connectors': {},
-    'workflowMetaData': {
-        'serviceInputTypeIdentifier': 'com.apple.Automator.nothing',
-        'serviceOutputTypeIdentifier': 'com.apple.Automator.nothing',
-        'serviceProcessesInput': 0,
-        'workflowTypeIdentifier': 'com.apple.Automator.servicesMenu',
-    }
-}
-
-with open(os.path.join(workflow_dir, 'Info.plist'), 'wb') as f:
-    plistlib.dump(info, f)
-with open(os.path.join(workflow_dir, 'document.wflow'), 'wb') as f:
-    plistlib.dump(wflow, f)
-
-# Save to snippet config
-config_dir = os.path.expanduser('~/.config/keys')
-os.makedirs(config_dir, exist_ok=True)
-config_path = os.path.join(config_dir, 'snippets.json')
+config_path = '$SNIPPET_CONFIG'
 snippets = {}
 if os.path.exists(config_path):
     with open(config_path) as f:
         snippets = json.load(f)
-snippets[name] = {
-    'text': text,
-    'shortcut': shortcut_plist,
-    'service': service_name,
+snippets['''$name'''] = {
+    'text': '''$text''',
+    'shortcut': '$plist_key',
 }
 with open(config_path, 'w') as f:
     json.dump(snippets, f, indent=2)
-
 print('OK')
 " 2>/dev/null
 
     if [[ $? -ne 0 ]]; then
-        echo -e "  ${RED}${FAIL} Failed to create snippet.${RST}\n"
+        echo -e "  ${RED}${FAIL} Failed to save snippet.${RST}\n"
         return 1
     fi
 
-    local workflow_path="${SERVICES_DIR}/${service_name}.workflow"
+    # ── Compile daemon if needed
+    if ! ensure_daemon; then
+        return 1
+    fi
 
-    # Register the workflow bundle with Launch Services so macOS discovers it
-    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$workflow_path" 2>/dev/null || true
+    # ── Start/restart daemon
+    echo -e "  ${DIM}Starting snippet daemon...${RST}"
+    restart_daemon
 
-    # Bind the shortcut via pbs (services shortcut store)
-    # The key format depends on whether the bundle has an ID
-    local pbs_path="$HOME/Library/Preferences/pbs.plist"
-    local safe_name
-    safe_name=$(echo "$name" | sed 's/[^a-zA-Z0-9]/-/g')
-    local bundle_id="com.keys-cli.snippet.${safe_name}"
-
-    # Write both key formats to cover all macOS versions
-    local -a service_keys=(
-        "(null) - ${service_name} - runWorkflowAsService"
-        "${bundle_id} - ${service_name} - runWorkflowAsService"
-    )
-    for service_key in "${service_keys[@]}"; do
-        /usr/libexec/PlistBuddy -c "Delete :NSServicesStatus:'${service_key}'" "$pbs_path" 2>/dev/null || true
-        /usr/libexec/PlistBuddy -c "Add :NSServicesStatus:'${service_key}' dict" "$pbs_path" 2>/dev/null || true
-        /usr/libexec/PlistBuddy -c "Add :NSServicesStatus:'${service_key}':enabled bool true" "$pbs_path" 2>/dev/null || true
-        /usr/libexec/PlistBuddy -c "Add :NSServicesStatus:'${service_key}':key_equivalent string ${plist_key}" "$pbs_path" 2>/dev/null || true
-    done
-
-    # Reload services
-    /System/Library/CoreServices/pbs -flush 2>/dev/null || killall pbs 2>/dev/null || true
-    apply_changes
+    # Give daemon a moment to start and register hotkeys
+    sleep 1
 
     local preview="$text"
     (( ${#preview} > 50 )) && preview="${preview:0:50}..."
 
     echo -e "\n  ${GRN}${BLD}${OK} Snippet created:${RST}"
     echo -e "    ${WHT}${human_key}${RST} ${ARROW} pastes \"${CYN}${preview}${RST}\""
-    echo -e "\n  ${DIM}The shortcut should work automatically. If not, enable it in:${RST}"
-    echo -e "  ${DIM}System Settings → Keyboard → Keyboard Shortcuts → Services → Text${RST}"
-    echo -e "  ${DIM}Look for \"${service_name}\" and assign ${human_key}${RST}\n"
+
+    if [[ "$(daemon_status)" == "running" ]]; then
+        echo -e "\n  ${GRN}${OK} Daemon is running. Shortcut is active now.${RST}"
+    else
+        echo -e "\n  ${YEL}${WARN} Daemon may need Accessibility permission.${RST}"
+        echo -e "  ${DIM}Grant it in: System Settings → Privacy & Security → Accessibility${RST}"
+        echo -e "  ${DIM}Then run: keys snippet restart${RST}"
+    fi
+    echo ""
 }
 
 cmd_snippet_list() {
@@ -962,7 +993,6 @@ cmd_snippet_list() {
         return
     fi
 
-    local count=0
     python3 -c "
 import json, sys
 with open('$SNIPPET_CONFIG') as f:
@@ -978,11 +1008,17 @@ for name, info in snippets.items():
         local human
         human=$(plist_to_human "$skey")
         printf "  ${WHT}%-14s${RST}  ${ARROW}  %-16s  ${CYN}%s${RST}\n" "$human" "$sname" "$stext"
-        ((count++))
     done
 
     echo -e "  ${GRY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
-    echo -e "  ${DIM}Workflows stored in ~/Library/Services/${RST}\n"
+
+    local status
+    status=$(daemon_status)
+    if [[ "$status" == "running" ]]; then
+        echo -e "  ${GRN}${OK} Daemon: running${RST}\n"
+    else
+        echo -e "  ${YEL}${WARN} Daemon: stopped${RST} — run ${WHT}keys snippet restart${RST}\n"
+    fi
 }
 
 cmd_snippet_delete() {
@@ -994,43 +1030,39 @@ cmd_snippet_delete() {
     else
         # Show list first
         if [[ -f "$SNIPPET_CONFIG" ]]; then
-            local idx=0
-            local -a names=()
             python3 -c "
 import json
 with open('$SNIPPET_CONFIG') as f:
     snippets = json.load(f)
-for name in snippets:
-    print(name)
-" 2>/dev/null | while IFS= read -r sname; do
-                ((idx++))
-                names+=("$sname")
-                echo -e "    ${YEL}${idx}${RST})  ${sname}"
-            done
+for i, name in enumerate(snippets, 1):
+    print(f'  {i})  {name}')
+" 2>/dev/null
         fi
         echo ""
         read -rp "  Snippet name to delete: " name
     fi
     [[ -z "$name" ]] && { echo -e "  ${RED}Aborted.${RST}"; return 1; }
 
-    local service_name="${SNIPPET_PREFIX} - ${name}"
-    local workflow_path="${SERVICES_DIR}/${service_name}.workflow"
+    # Check if snippet exists in config
+    local exists
+    exists=$(python3 -c "
+import json, os
+config_path = '$SNIPPET_CONFIG'
+if not os.path.exists(config_path):
+    print('no')
+else:
+    with open(config_path) as f:
+        snippets = json.load(f)
+    print('yes' if '''$name''' in snippets else 'no')
+" 2>/dev/null)
 
-    if [[ ! -d "$workflow_path" ]]; then
+    if [[ "$exists" != "yes" ]]; then
         echo -e "  ${RED}${FAIL} Snippet \"${name}\" not found.${RST}\n"
         return 1
     fi
 
     read -rp "  Delete snippet \"${name}\"? [y/N]: " yn
     [[ "$yn" =~ ^[Yy]$ ]] || { echo -e "  ${YEL}Cancelled.${RST}"; return 0; }
-
-    # Remove workflow
-    rm -rf "$workflow_path"
-
-    # Remove from pbs
-    local pbs_path="$HOME/Library/Preferences/pbs.plist"
-    local service_key="(null) - ${service_name} - runWorkflowAsService"
-    /usr/libexec/PlistBuddy -c "Delete :NSServicesStatus:'${service_key}'" "$pbs_path" 2>/dev/null || true
 
     # Remove from config
     python3 -c "
@@ -1044,9 +1076,22 @@ if os.path.exists(config_path):
         json.dump(snippets, f, indent=2)
 " 2>/dev/null
 
-    /System/Library/CoreServices/pbs -flush 2>/dev/null || killall pbs 2>/dev/null || true
+    # Check if any snippets remain
+    local remaining
+    remaining=$(python3 -c "import json; print(len(json.load(open('$SNIPPET_CONFIG'))))" 2>/dev/null || echo "0")
 
-    echo -e "  ${GRN}${OK} Deleted snippet \"${name}\".${RST}\n"
+    if [[ "$remaining" == "0" ]]; then
+        stop_daemon
+        echo -e "  ${GRN}${OK} Deleted snippet \"${name}\". No snippets left — daemon stopped.${RST}\n"
+    else
+        restart_daemon
+        echo -e "  ${GRN}${OK} Deleted snippet \"${name}\". Daemon restarted with ${remaining} snippet(s).${RST}\n"
+    fi
+
+    # Clean up old Automator workflow if it exists
+    local service_name="${SNIPPET_PREFIX} - ${name}"
+    local workflow_path="${SERVICES_DIR}/${service_name}.workflow"
+    [[ -d "$workflow_path" ]] && rm -rf "$workflow_path"
 }
 
 # ── Interactive Mode ───────────────────────────────────────────────────
@@ -1106,6 +1151,8 @@ ${BLU}${BLD}  ⌨  keys${RST} ${GRY}v${VERSION}${RST} — Native macOS Keyboard 
     ${MAG}snippet${RST} add <name> <key> <text>  Paste text with a shortcut
     ${MAG}snippet${RST} list                    List all snippets
     ${MAG}snippet${RST} delete <name>            Delete a snippet
+    ${MAG}snippet${RST} status                   Show daemon status
+    ${MAG}snippet${RST} restart                  Restart the snippet daemon
     ${BLU}update${RST}                         Update keys to the latest version
     ${RED}nuke${RST}                           Remove ALL custom shortcuts
 
