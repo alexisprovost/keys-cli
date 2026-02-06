@@ -255,25 +255,26 @@ check_all_conflicts() {
         fi
     done <<< "$scan"
 
-    declare -A SYSTEM_MAP=(
-        ["@\$3"]="Screenshot Full Screen"
-        ["@\$4"]="Screenshot Selection"
-        ["@\$5"]="Screenshot & Recording Options"
-        ["@ "]="Spotlight"
-        ["^@ "]="Emoji & Symbols"
-        ["^@Q"]="Lock Screen"
-        ["~@\x1b"]="Force Quit"
-        ["^@F"]="Toggle Fullscreen"
-        ["@\$N"]="New Folder (Finder)"
+    local -a sys_keys=('@$3' '@$4' '@$5' '@ ' '^@ ' '^@Q' '^@F' '@$N')
+    local -a sys_names=(
+        "Screenshot Full Screen"
+        "Screenshot Selection"
+        "Screenshot & Recording Options"
+        "Spotlight"
+        "Emoji & Symbols"
+        "Lock Screen"
+        "Toggle Fullscreen"
+        "New Folder (Finder)"
     )
 
-    for sys_key in "${!SYSTEM_MAP[@]}"; do
-        if [[ "$plist_key" == "$sys_key" ]]; then
+    local i
+    for i in "${!sys_keys[@]}"; do
+        if [[ "$plist_key" == "${sys_keys[$i]}" ]]; then
             if (( conflicts == 0 )); then
                 echo ""
                 echo -e "  ${YEL}${WARN} Conflicts for ${WHT}${human}${RST}${YEL} (${plist_key}):${RST}"
             fi
-            echo -e "    ${RED}${FAIL}${RST}  ${MAG}macOS System${RST} ${ARROW} ${SYSTEM_MAP[$sys_key]}"
+            echo -e "    ${RED}${FAIL}${RST}  ${MAG}macOS System${RST} ${ARROW} ${sys_names[$i]}"
             ((conflicts++))
         fi
     done
