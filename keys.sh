@@ -822,7 +822,7 @@ info = {
     'NSServices': [{
         'NSMenuItem': {'default': service_name},
         'NSMessage': 'runWorkflowAsService',
-        'NSSendTypes': ['public.utf8-plain-text'],
+        'NSRequiredContext': {},
     }]
 }
 
@@ -920,13 +920,24 @@ print('OK')
     # Register the workflow bundle with Launch Services so macOS discovers it
     /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$workflow_path" 2>/dev/null || true
 
-    # Try to bind the shortcut via pbs (services shortcut store)
+    # Bind the shortcut via pbs (services shortcut store)
+    # The key format depends on whether the bundle has an ID
     local pbs_path="$HOME/Library/Preferences/pbs.plist"
-    local service_key="(null) - ${service_name} - runWorkflowAsService"
-    /usr/libexec/PlistBuddy -c "Delete :NSServicesStatus:'${service_key}'" "$pbs_path" 2>/dev/null || true
-    /usr/libexec/PlistBuddy -c "Add :NSServicesStatus:'${service_key}' dict" "$pbs_path" 2>/dev/null || true
-    /usr/libexec/PlistBuddy -c "Add :NSServicesStatus:'${service_key}':enabled bool true" "$pbs_path" 2>/dev/null || true
-    /usr/libexec/PlistBuddy -c "Add :NSServicesStatus:'${service_key}':key_equivalent string ${plist_key}" "$pbs_path" 2>/dev/null || true
+    local safe_name
+    safe_name=$(echo "$name" | sed 's/[^a-zA-Z0-9]/-/g')
+    local bundle_id="com.keys-cli.snippet.${safe_name}"
+
+    # Write both key formats to cover all macOS versions
+    local -a service_keys=(
+        "(null) - ${service_name} - runWorkflowAsService"
+        "${bundle_id} - ${service_name} - runWorkflowAsService"
+    )
+    for service_key in "${service_keys[@]}"; do
+        /usr/libexec/PlistBuddy -c "Delete :NSServicesStatus:'${service_key}'" "$pbs_path" 2>/dev/null || true
+        /usr/libexec/PlistBuddy -c "Add :NSServicesStatus:'${service_key}' dict" "$pbs_path" 2>/dev/null || true
+        /usr/libexec/PlistBuddy -c "Add :NSServicesStatus:'${service_key}':enabled bool true" "$pbs_path" 2>/dev/null || true
+        /usr/libexec/PlistBuddy -c "Add :NSServicesStatus:'${service_key}':key_equivalent string ${plist_key}" "$pbs_path" 2>/dev/null || true
+    done
 
     # Reload services
     /System/Library/CoreServices/pbs -flush 2>/dev/null || killall pbs 2>/dev/null || true
