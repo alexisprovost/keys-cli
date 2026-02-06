@@ -32,6 +32,12 @@ keys delete Finder                            # Delete a shortcut
 keys export ~/Desktop/backup.plist            # Backup all shortcuts
 keys import ~/Desktop/backup.plist            # Restore from backup
 keys nuke                                     # Remove ALL custom shortcuts
+
+# Snippets — paste text with a shortcut
+keys snippet add "Zoom" cmd+shift+z "https://zoom.us/j/123456"
+keys snippet add "Email" cmd+shift+e "me@example.com"
+keys snippet list                             # List all snippets
+keys snippet delete "Zoom"                    # Remove a snippet
 ```
 
 ## Shortcut Format
@@ -73,7 +79,23 @@ When you add a shortcut, `keys` also:
 | `check <shortcut>` | Check a shortcut for system-wide conflicts |
 | `export [file]` | Export all shortcuts to a plist backup |
 | `import <file>` | Import shortcuts from a plist backup |
+| `snippet add <name> <key> <text>` | Paste text when shortcut is pressed |
+| `snippet list` | List all snippets |
+| `snippet delete <name>` | Delete a snippet |
 | `nuke` | Remove all custom shortcuts (requires confirmation) |
+
+## Snippets
+
+Snippets let you paste any text with a keyboard shortcut — perfect for Zoom links, email addresses, canned responses, etc.
+
+```bash
+keys snippet add "Zoom" cmd+shift+z "https://zoom.us/j/123456789"
+```
+
+This creates a native macOS Quick Action (Automator workflow) in `~/Library/Services/` that copies the text to your clipboard and pastes it. The shortcut is bound automatically.
+
+If the shortcut doesn't activate right away, enable it in:
+**System Settings > Keyboard > Keyboard Shortcuts > Services > Text** — look for "Keys - Zoom" and assign the shortcut.
 
 ## Requirements
 

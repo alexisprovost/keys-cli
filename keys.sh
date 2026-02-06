@@ -20,6 +20,10 @@ VERSION="2.0.0"
 PREFS_DIR="$HOME/Library/Preferences"
 GLOBAL_DOMAIN="-g"  # aka NSGlobalDomain / .GlobalPreferences.plist
 UA_PLIST="com.apple.universalaccess"
+SERVICES_DIR="$HOME/Library/Services"
+SNIPPET_CONFIG_DIR="$HOME/.config/keys"
+SNIPPET_CONFIG="$SNIPPET_CONFIG_DIR/snippets.json"
+SNIPPET_PREFIX="Keys"
 
 # ── TUI Colors & Glyphs ────────────────────────────────────────────────
 if [[ -t 1 ]]; then
@@ -697,6 +701,326 @@ print(f'Removed shortcuts from {len(domains)} domains')
     echo -e "  ${GRN}${OK} All custom shortcuts removed.${RST}\n"
 }
 
+# ── Snippet Commands ───────────────────────────────────────────────────
+# Snippets create macOS Quick Actions (Automator workflows) in
+# ~/Library/Services/ that copy text to clipboard and paste it.
+# The shortcut is bound via System Settings > Keyboard > Services.
+
+cmd_snippet() {
+    case "${1:-}" in
+        add)    shift; cmd_snippet_add "$@" ;;
+        list|ls) cmd_snippet_list ;;
+        delete|rm) shift; cmd_snippet_delete "$@" ;;
+        *)      cmd_snippet_help ;;
+    esac
+}
+
+cmd_snippet_help() {
+    echo -e "
+  ${BLU}${BLD}${KEY} Snippet — Paste text with a shortcut${RST}
+
+  ${BLD}USAGE${RST}
+    keys snippet add <name> <shortcut> <text>
+    keys snippet list
+    keys snippet delete <name>
+
+  ${BLD}EXAMPLES${RST}
+    ${GRY}\$${RST} keys snippet add \"Zoom\" cmd+shift+z \"https://zoom.us/j/123456\"
+    ${GRY}\$${RST} keys snippet add \"Email\" cmd+shift+e \"me@example.com\"
+    ${GRY}\$${RST} keys snippet list
+    ${GRY}\$${RST} keys snippet delete \"Zoom\"
+
+  ${BLD}HOW IT WORKS${RST}
+    Creates a macOS Quick Action (Automator workflow) in ~/Library/Services/
+    that copies your text to the clipboard and pastes it. Assign the shortcut in:
+      ${CYN}System Settings → Keyboard → Keyboard Shortcuts → Services → Text${RST}
+"
+}
+
+cmd_snippet_add() {
+    echo -e "\n  ${GRN}${BLD}${KEY} Add Snippet${RST}\n"
+
+    # ── Name
+    local name
+    if [[ -n "${1:-}" ]]; then
+        name="$1"; shift
+    else
+        echo -e "  ${DIM}A short name for this snippet (e.g. \"Zoom\", \"Email\")${RST}"
+        read -rp "  Name: " name
+    fi
+    [[ -z "$name" ]] && { echo -e "  ${RED}Aborted.${RST}"; return 1; }
+
+    local service_name="${SNIPPET_PREFIX} - ${name}"
+
+    # ── Shortcut
+    local shortcut_input plist_key
+    if [[ -n "${1:-}" ]]; then
+        shortcut_input="$1"; shift
+    else
+        echo -e "\n  ${DIM}e.g. cmd+shift+z${RST}"
+        read -rp "  Shortcut: " shortcut_input
+    fi
+    [[ -z "$shortcut_input" ]] && { echo -e "  ${RED}Aborted.${RST}"; return 1; }
+    plist_key=$(human_to_plist "$shortcut_input")
+    local human_key
+    human_key=$(plist_to_human "$plist_key")
+
+    # ── Text
+    local text
+    if [[ -n "${1:-}" ]]; then
+        text="$1"; shift
+    else
+        echo -e "\n  ${DIM}The text to paste (e.g. your Zoom link)${RST}"
+        read -rp "  Text: " text
+    fi
+    [[ -z "$text" ]] && { echo -e "  ${RED}Aborted.${RST}"; return 1; }
+
+    # ── Conflict check
+    if check_all_conflicts "$plist_key"; then
+        read -rp "  Continue anyway? [y/N]: " yn
+        [[ "$yn" =~ ^[Yy]$ ]] || { echo -e "  ${YEL}Cancelled.${RST}"; return 0; }
+    else
+        echo -e "  ${GRN}${OK} No conflicts for ${WHT}${human_key}${RST}"
+    fi
+
+    # ── Create Automator Quick Action via Python
+    python3 -c "
+import plistlib, os, json, base64
+from uuid import uuid4
+
+name = '''$name'''
+text = '''$text'''
+shortcut_plist = '''$plist_key'''
+service_name = '''$service_name'''
+
+# Encode text as base64 to avoid shell quoting issues
+encoded = base64.b64encode(text.encode()).decode()
+shell_script = f\"\"\"export PATH=/usr/bin:/usr/local/bin:\$PATH
+echo '{encoded}' | base64 -d | pbcopy
+sleep 0.1
+osascript -e 'tell application \"System Events\" to keystroke \"v\" using command down'
+\"\"\"
+
+services_dir = os.path.expanduser('~/Library/Services')
+workflow_dir = os.path.join(services_dir, f'{service_name}.workflow', 'Contents')
+os.makedirs(workflow_dir, exist_ok=True)
+
+# Info.plist
+info = {
+    'NSServices': [{
+        'NSMenuItem': {'default': service_name},
+        'NSMessage': 'runWorkflowAsService',
+        'NSRequiredContext': {},
+    }]
+}
+
+# document.wflow
+uid1 = str(uuid4()).upper()
+uid2 = str(uuid4()).upper()
+uid3 = str(uuid4()).upper()
+wflow = {
+    'AMApplicationBuild': '523',
+    'AMApplicationVersion': '2.10',
+    'AMDocumentVersion': '2',
+    'actions': [{
+        'action': {
+            'AMAccepts': {'Container': 'List', 'Optional': True, 'Types': ['com.apple.cocoa.string']},
+            'AMActionVersion': '2.0.3',
+            'AMApplication': ['Automator'],
+            'AMCategory': 'AMCategoryUtilities',
+            'AMIconName': 'RunShellScript',
+            'AMParameterProperties': {
+                'COMMAND_STRING': {}, 'CheckedForUserDefaultShell': {},
+                'inputMethod': {}, 'shell': {}, 'source': {}
+            },
+            'AMProvides': {'Container': 'List', 'Types': ['com.apple.cocoa.string']},
+            'ActionBundlePath': '/System/Library/Automator/Run Shell Script.action',
+            'ActionName': 'Run Shell Script',
+            'ActionParameters': {
+                'COMMAND_STRING': shell_script,
+                'CheckedForUserDefaultShell': True,
+                'inputMethod': 1,
+                'shell': '/bin/bash',
+                'source': ''
+            },
+            'BundleIdentifier': 'com.apple.RunShellScript',
+            'CFBundleVersion': '2.0.3',
+            'CanShowSelectedItemsWhenRun': False,
+            'CanShowWhenRun': True,
+            'Category': ['AMCategoryUtilities'],
+            'Class Name': 'RunShellScriptAction',
+            'InputUUID': uid1,
+            'Keywords': ['Shell', 'Script', 'Command', 'Run', 'Unix'],
+            'OutputUUID': uid2,
+            'UUID': uid3,
+            'UnlocalizedApplications': ['Automator'],
+            'arguments': {
+                '0': {'default value': 0, 'name': 'inputMethod', 'required': '0', 'type': '0', 'uuid': '0'},
+                '1': {'default value': '', 'name': 'source', 'required': '0', 'type': '0', 'uuid': '1'},
+                '2': {'default value': '/bin/bash', 'name': 'shell', 'required': '0', 'type': '0', 'uuid': '2'},
+                '3': {'default value': '', 'name': 'COMMAND_STRING', 'required': '0', 'type': '0', 'uuid': '3'},
+                '4': {'default value': True, 'name': 'CheckedForUserDefaultShell', 'required': '0', 'type': '0', 'uuid': '4'},
+            },
+            'conversionLabel': 0,
+            'isViewVisible': True,
+        }
+    }],
+    'connectors': {},
+    'workflowMetaData': {
+        'serviceInputTypeIdentifier': 'com.apple.Automator.nothing',
+        'serviceOutputTypeIdentifier': 'com.apple.Automator.nothing',
+        'serviceProcessesInput': 0,
+        'workflowTypeIdentifier': 'com.apple.Automator.servicesMenu',
+    }
+}
+
+with open(os.path.join(workflow_dir, 'Info.plist'), 'wb') as f:
+    plistlib.dump(info, f)
+with open(os.path.join(workflow_dir, 'document.wflow'), 'wb') as f:
+    plistlib.dump(wflow, f)
+
+# Save to snippet config
+config_dir = os.path.expanduser('~/.config/keys')
+os.makedirs(config_dir, exist_ok=True)
+config_path = os.path.join(config_dir, 'snippets.json')
+snippets = {}
+if os.path.exists(config_path):
+    with open(config_path) as f:
+        snippets = json.load(f)
+snippets[name] = {
+    'text': text,
+    'shortcut': shortcut_plist,
+    'service': service_name,
+}
+with open(config_path, 'w') as f:
+    json.dump(snippets, f, indent=2)
+
+print('OK')
+" 2>/dev/null
+
+    if [[ $? -ne 0 ]]; then
+        echo -e "  ${RED}${FAIL} Failed to create snippet.${RST}\n"
+        return 1
+    fi
+
+    # Try to bind the shortcut via pbs (services shortcut store)
+    local pbs_path="$HOME/Library/Preferences/pbs.plist"
+    local service_key="(null) - ${service_name} - runWorkflowAsService"
+    /usr/libexec/PlistBuddy -c "Delete :NSServicesStatus:'${service_key}'" "$pbs_path" 2>/dev/null || true
+    /usr/libexec/PlistBuddy -c "Add :NSServicesStatus:'${service_key}' dict" "$pbs_path" 2>/dev/null || true
+    /usr/libexec/PlistBuddy -c "Add :NSServicesStatus:'${service_key}':enabled bool true" "$pbs_path" 2>/dev/null || true
+    /usr/libexec/PlistBuddy -c "Add :NSServicesStatus:'${service_key}':key_equivalent string ${plist_key}" "$pbs_path" 2>/dev/null || true
+
+    # Reload services
+    /System/Library/CoreServices/pbs -flush 2>/dev/null || killall pbs 2>/dev/null || true
+    apply_changes
+
+    local preview="$text"
+    (( ${#preview} > 50 )) && preview="${preview:0:50}..."
+
+    echo -e "\n  ${GRN}${BLD}${OK} Snippet created:${RST}"
+    echo -e "    ${WHT}${human_key}${RST} ${ARROW} pastes \"${CYN}${preview}${RST}\""
+    echo -e "\n  ${DIM}The shortcut should work automatically. If not, enable it in:${RST}"
+    echo -e "  ${DIM}System Settings → Keyboard → Keyboard Shortcuts → Services → Text${RST}"
+    echo -e "  ${DIM}Look for \"${service_name}\" and assign ${human_key}${RST}\n"
+}
+
+cmd_snippet_list() {
+    echo -e "\n  ${CYN}${BLD}${KEY} Snippets${RST}"
+    echo -e "  ${GRY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
+
+    if [[ ! -f "$SNIPPET_CONFIG" ]]; then
+        echo -e "  ${DIM}No snippets yet. Create one with: keys snippet add${RST}\n"
+        return
+    fi
+
+    local count=0
+    python3 -c "
+import json, sys
+with open('$SNIPPET_CONFIG') as f:
+    snippets = json.load(f)
+if not snippets:
+    sys.exit(1)
+for name, info in snippets.items():
+    text = info['text']
+    if len(text) > 60:
+        text = text[:60] + '...'
+    print(f'{name}\t{info[\"shortcut\"]}\t{text}')
+" 2>/dev/null | while IFS=$'\t' read -r sname skey stext; do
+        local human
+        human=$(plist_to_human "$skey")
+        printf "  ${WHT}%-14s${RST}  ${ARROW}  %-16s  ${CYN}%s${RST}\n" "$human" "$sname" "$stext"
+        ((count++))
+    done
+
+    echo -e "  ${GRY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
+    echo -e "  ${DIM}Workflows stored in ~/Library/Services/${RST}\n"
+}
+
+cmd_snippet_delete() {
+    echo -e "\n  ${RED}${BLD}${KEY} Delete Snippet${RST}\n"
+
+    local name
+    if [[ -n "${1:-}" ]]; then
+        name="$1"; shift
+    else
+        # Show list first
+        if [[ -f "$SNIPPET_CONFIG" ]]; then
+            local idx=0
+            local -a names=()
+            python3 -c "
+import json
+with open('$SNIPPET_CONFIG') as f:
+    snippets = json.load(f)
+for name in snippets:
+    print(name)
+" 2>/dev/null | while IFS= read -r sname; do
+                ((idx++))
+                names+=("$sname")
+                echo -e "    ${YEL}${idx}${RST})  ${sname}"
+            done
+        fi
+        echo ""
+        read -rp "  Snippet name to delete: " name
+    fi
+    [[ -z "$name" ]] && { echo -e "  ${RED}Aborted.${RST}"; return 1; }
+
+    local service_name="${SNIPPET_PREFIX} - ${name}"
+    local workflow_path="${SERVICES_DIR}/${service_name}.workflow"
+
+    if [[ ! -d "$workflow_path" ]]; then
+        echo -e "  ${RED}${FAIL} Snippet \"${name}\" not found.${RST}\n"
+        return 1
+    fi
+
+    read -rp "  Delete snippet \"${name}\"? [y/N]: " yn
+    [[ "$yn" =~ ^[Yy]$ ]] || { echo -e "  ${YEL}Cancelled.${RST}"; return 0; }
+
+    # Remove workflow
+    rm -rf "$workflow_path"
+
+    # Remove from pbs
+    local pbs_path="$HOME/Library/Preferences/pbs.plist"
+    local service_key="(null) - ${service_name} - runWorkflowAsService"
+    /usr/libexec/PlistBuddy -c "Delete :NSServicesStatus:'${service_key}'" "$pbs_path" 2>/dev/null || true
+
+    # Remove from config
+    python3 -c "
+import json, os
+config_path = '$SNIPPET_CONFIG'
+if os.path.exists(config_path):
+    with open(config_path) as f:
+        snippets = json.load(f)
+    snippets.pop('''$name''', None)
+    with open(config_path, 'w') as f:
+        json.dump(snippets, f, indent=2)
+" 2>/dev/null
+
+    /System/Library/CoreServices/pbs -flush 2>/dev/null || killall pbs 2>/dev/null || true
+
+    echo -e "  ${GRN}${OK} Deleted snippet \"${name}\".${RST}\n"
+}
+
 # ── Interactive Mode ───────────────────────────────────────────────────
 
 cmd_interactive() {
@@ -710,6 +1034,7 @@ cmd_interactive() {
         echo -e "   ${BLU}c${RST}heck     Check shortcut for conflicts"
         echo -e "   e${MAG}x${RST}port    Export all shortcuts (backup)"
         echo -e "   ${MAG}i${RST}mport    Import shortcuts from backup"
+        echo -e "   ${MAG}s${RST}nippet   Paste text with a shortcut (e.g. Zoom link)"
         echo -e "   ${RED}n${RST}uke      Remove all custom shortcuts"
         echo -e "   ${GRY}q${RST}uit"
         echo ""
@@ -723,6 +1048,7 @@ cmd_interactive() {
             c|check)    cmd_check ;;
             x|export)   cmd_export ;;
             i|import)   cmd_import ;;
+            s|snippet)  cmd_snippet_help; read -rp "  ${DOT} snippet " sub; cmd_snippet "$sub" ;;
             n|nuke)     cmd_nuke ;;
             q|quit|exit) echo -e "  ${DIM}Bye.${RST}"; exit 0 ;;
             *)          echo -e "  ${RED}?${RST} Unknown: ${choice}" ;;
@@ -747,6 +1073,9 @@ ${BLU}${BLD}  ⌨  keys${RST} ${GRY}v${VERSION}${RST} — Native macOS Keyboard 
     ${BLU}check${RST} <shortcut>               Check for conflicts system-wide
     ${MAG}export${RST} [file]                  Backup all shortcuts to plist
     ${MAG}import${RST} <file>                  Restore shortcuts from backup
+    ${MAG}snippet${RST} add <name> <key> <text>  Paste text with a shortcut
+    ${MAG}snippet${RST} list                    List all snippets
+    ${MAG}snippet${RST} delete <name>            Delete a snippet
     ${RED}nuke${RST}                           Remove ALL custom shortcuts
 
   ${BLD}SHORTCUT FORMAT${RST}
@@ -762,6 +1091,8 @@ ${BLU}${BLD}  ⌨  keys${RST} ${GRY}v${VERSION}${RST} — Native macOS Keyboard 
     ${GRY}\${RST} keys list
     ${GRY}\${RST} keys list safari
     ${GRY}\${RST} keys delete Finder
+    ${GRY}\${RST} keys snippet add \"Zoom\" cmd+shift+z \"https://zoom.us/j/123456\"
+    ${GRY}\${RST} keys snippet list
     ${GRY}\${RST} keys export ~/Desktop/my-shortcuts.plist
 
   ${BLD}HOW IT WORKS${RST}
@@ -789,6 +1120,7 @@ case "${1:-}" in
     check|test)     shift; cmd_check "${1:-}" ;;
     export|backup)  shift; cmd_export "${1:-}" ;;
     import|restore) shift; cmd_import "${1:-}" ;;
+    snippet)        shift; cmd_snippet "$@" ;;
     nuke|reset)     cmd_nuke ;;
     help|-h|--help) usage ;;
     version|-v|--version) echo "keys v${VERSION}" ;;
