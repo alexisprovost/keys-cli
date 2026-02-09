@@ -1,8 +1,6 @@
 # keys
 
-Native macOS keyboard shortcut manager. Reads and writes directly to macOS `NSUserKeyEquivalents` plists — the same system that **System Settings > Keyboard > Shortcuts > App Shortcuts** uses.
-
-No config files, no databases, no daemons. Just the native macOS preference system.
+Paste text with a keyboard shortcut. Assign global hotkeys that instantly paste Zoom links, email addresses, canned responses — anything.
 
 ## Install
 
@@ -21,88 +19,50 @@ chmod +x /usr/local/bin/keys
 
 ```bash
 keys                                          # Interactive mode
-keys add Safari "Show Reader" cmd+shift+r     # Add a shortcut
-keys add Finder "Show Package Contents" ⌘⇧O   # Symbol format works too
-keys add global "Emoji & Symbols" ctrl+cmd+space
-keys list                                     # List all custom shortcuts
-keys list safari                              # Filter by app
-keys check cmd+shift+k                        # Check for conflicts
-keys edit Safari                              # Edit a shortcut interactively
-keys delete Finder                            # Delete a shortcut
-keys export ~/Desktop/backup.plist            # Backup all shortcuts
-keys import ~/Desktop/backup.plist            # Restore from backup
+keys add "Zoom" cmd+shift+z "https://zoom.us/j/123456"
+keys add "Email" cmd+shift+e "me@example.com"
+keys add "Sig" cmd+shift+s "Thanks,\nAlex"
+keys list                                     # List all snippets
+keys delete "Zoom"                            # Remove a snippet
+keys status                                   # Check if daemon is running
+keys restart                                  # Restart the daemon
 keys update                                   # Update to latest version
-keys nuke                                     # Remove ALL custom shortcuts
-
-# Snippets — paste text with a shortcut
-keys snippet add "Zoom" cmd+shift+z "https://zoom.us/j/123456"
-keys snippet add "Email" cmd+shift+e "me@example.com"
-keys snippet list                             # List all snippets
-keys snippet delete "Zoom"                    # Remove a snippet
 ```
 
 ## Shortcut Format
 
-Three input formats are accepted and automatically converted:
+Two input formats are accepted:
 
-| Format | Example | Notes |
-|---|---|---|
-| Human-readable | `cmd+shift+o` | Also accepts `command`, `option`, `alt`, `control` |
-| Symbol | `⌘⇧O` | macOS-style modifier symbols |
-| Plist (internal) | `@$O` | What macOS actually stores (`@`=⌘ `~`=⌥ `^`=⌃ `$`=⇧) |
+| Format | Example |
+|---|---|
+| Human-readable | `cmd+shift+z` (also accepts `command`, `option`, `alt`, `control`) |
+| Symbol | `⌘⇧Z` |
 
 ## How It Works
 
-`keys` uses the `defaults` command to write `NSUserKeyEquivalents` entries into macOS preference plists. This is exactly what System Settings does when you add app shortcuts through the GUI.
+A lightweight Swift daemon runs in the background and listens for your hotkeys via macOS Carbon global hotkey API. When triggered, it copies your text to the clipboard and simulates `Cmd+V` to paste it.
 
-**Storage locations:**
-
-| Scope | Plist |
-|---|---|
-| Global (all apps) | `~/Library/Preferences/.GlobalPreferences.plist` |
-| Per-app | `~/Library/Preferences/<bundle-id>.plist` |
-| App registry | `~/Library/Preferences/com.apple.universalaccess.plist` |
-
-When you add a shortcut, `keys` also:
-- Registers the app with `com.apple.universalaccess` so it appears in System Settings
-- Resolves app names to bundle IDs automatically (e.g. `Safari` -> `com.apple.Safari`)
-- Runs `activateSettings -u` to apply changes without a logout
-- Scans all domains for conflicts before writing
+- Daemon compiles automatically on first use (requires Xcode Command Line Tools)
+- Starts on login via LaunchAgent
+- Snippets stored in `~/.config/keys/snippets.json`
+- Requires Accessibility permission (you'll be prompted on first run)
 
 ## Commands
 
 | Command | Description |
 |---|---|
-| `add [app] [menu] [shortcut]` | Add a new shortcut |
-| `list [filter]` | List all custom shortcuts, optionally filtered |
-| `edit [app]` | Interactively edit an existing shortcut |
-| `delete [app]` | Delete a shortcut |
-| `check <shortcut>` | Check a shortcut for system-wide conflicts |
-| `export [file]` | Export all shortcuts to a plist backup |
-| `import <file>` | Import shortcuts from a plist backup |
-| `snippet add <name> <key> <text>` | Paste text when shortcut is pressed |
-| `snippet list` | List all snippets |
-| `snippet delete <name>` | Delete a snippet |
-| `update` | Update keys to the latest version from GitHub |
-| `nuke` | Remove all custom shortcuts (requires confirmation) |
-
-## Snippets
-
-Snippets let you paste any text with a keyboard shortcut — perfect for Zoom links, email addresses, canned responses, etc.
-
-```bash
-keys snippet add "Zoom" cmd+shift+z "https://zoom.us/j/123456789"
-```
-
-This creates a native macOS Quick Action (Automator workflow) in `~/Library/Services/` that copies the text to your clipboard and pastes it. The shortcut is bound automatically.
-
-If the shortcut doesn't activate right away, enable it in:
-**System Settings > Keyboard > Keyboard Shortcuts > Services > Text** — look for "Keys - Zoom" and assign the shortcut.
+| `add [name] [shortcut] [text]` | Add a new snippet |
+| `list` | List all snippets |
+| `delete [name]` | Delete a snippet |
+| `status` | Show daemon status |
+| `restart` | Restart the snippet daemon |
+| `stop` | Stop the snippet daemon |
+| `update` | Update keys to the latest version |
 
 ## Requirements
 
-- macOS (uses `defaults`, `osascript`, `python3`)
-- Bash 4+
+- macOS
+- Xcode Command Line Tools (`xcode-select --install`)
 - Python 3 (ships with macOS)
 
 ## License
